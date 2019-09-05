@@ -91,7 +91,7 @@ case class FastConsumer(master:String, zkHostPort:String, kafkaHostPort:String, 
   //保存偏移量
   private def saveOffsets(offsetRange: Array[(String,Int,Long)])={
     offsetRange.foreach(o=>{
-      val zkPath = s"${Globe_kafkaOffsetPath}/${groupId}/${o._1}/${o._2}"
+      val zkPath = Globe_kafkaOffsetPath+"/"+o._1+"/"+groupId+"/"+o._2
       if (zkclient.checkExists().forPath(zkPath) == null)
         zkclient.create().creatingParentsIfNeeded().forPath(zkPath)
       // 向对应分区第一次写入或者更新Offset 信息
@@ -103,7 +103,7 @@ case class FastConsumer(master:String, zkHostPort:String, kafkaHostPort:String, 
 
   //读取偏移量
   private def readOffsets= {
-    val zkTopicPath = Globe_kafkaOffsetPath+"/"+groupId+"/"+kafkaTopic
+    val zkTopicPath = Globe_kafkaOffsetPath+"/"+kafkaTopic+"/"+groupId+"/"
 
     // 检查路径是否存在，不存在就创建
     if (zkclient.checkExists().forPath(zkTopicPath) == null)
@@ -115,7 +115,7 @@ case class FastConsumer(master:String, zkHostPort:String, kafkaHostPort:String, 
     while(i.hasNext) {
       val partitionId = i.next()
       val topicPartition = new TopicPartition(kafkaTopic, Integer.parseInt(partitionId))
-      val offset = java.lang.Long.valueOf(new String(zkclient.getData().forPath(s"$zkTopicPath/${partitionId}"))).toLong
+      val offset = java.lang.Long.valueOf(new String(zkclient.getData().forPath(zkTopicPath+"/"+partitionId))).toLong
       offsets += ((topicPartition, offset))
     }
     offsets.toMap
