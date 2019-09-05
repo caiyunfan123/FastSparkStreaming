@@ -13,7 +13,54 @@ import scala.collection.mutable
 
 
 //三个坑点：1.闭包问题（如果对象不闭包，spark不通过）2.序列化问题（可以用自定义对象序列化）3.偏移量需要+1
-case class FastConsumer(master:String, zkHostPort:String, kafkaHostPort:String, kafkaTopic:String, groupId:String="10000", conf:Map[String,String]=Map[String,String](), otherKafkaConf:Map[String,String]=null) extends Serializable {
+case class FastConsumer(master:String, zkHostPort:String, kafkaHostPort:String, kafkaTopic:String, groupId:String="10000")(implicit conf:Map[String,String]=Map[String,String](), otherKafkaConf:Map[String,String]=null){
+  //对外接口，封装了维护偏移量的过程
+  def plan[K,V](plan:Plan[K,V]):this.type={
+    //注意闭包
+    val directStream=this.directStream
+    val acc=this.acc
+    val mapPlan=directStream.mapPartitions(a=>a.map(rdd=> {
+      //每个分区获取偏移量
+      val offsets = (rdd.topic(), rdd.partition(), rdd.offset())
+      val result=plan.mapMethod(rdd.value().asInstanceOf[String])
+      result._1->(result._2,offsets)
+    }))
+
+    val reduceByKeyPlan=mapPlan.reduceByKey((v1,v2)=> {
+      val result=plan.reduceByKey(v1._1.asInstanceOf[V], v2._1.asInstanceOf[V])
+      //数据处理完后，把上一条数据的偏移量发送出去，当前偏移量等下次再发送
+      acc.add(v1._2)
+      (result,v2._2)
+    })//把最后的偏移量发送出去，然后将KV缓存起来给window用
+      .mapPartitions(_.map(a=>{
+      acc.add(a._2._2)
+      (a._1,a._2._1)
+    })).cache()
+
+    reduceByKeyPlan.window(Duration(INTERVERL*WINDOWLENGTH_BEILV*1000),Duration(INTERVERL*WINDOWSLIDE_BEILV*1000))
+      .foreachRDD(
+        rdd=> {
+          rdd.foreach(a =>plan.window(a._1.asInstanceOf[K], a._2.asInstanceOf[V]))
+          //每次窗口统一保存偏移量
+          if(!acc.isZero) {
+            val arr2 = mutable.ArrayBuffer[(String, Int, Long)]()
+            val iterator = acc.value.iterator()
+            while (iterator.hasNext)
+              arr2 +=iterator.next()
+            val offsets = arr2.groupBy(a =>(a._1, a._2)).mapValues(a => a.sortBy(_._3)(Ordering[Long].reverse)(0)).values.toArray
+            saveOffsets(offsets)
+            acc.reset()
+          }
+        }
+      )
+    this
+  }
+  //对外接口，启动sparkStreaming
+  def start={
+    ssc.start()
+    ssc.awaitTermination()
+  }
+
   private val sparkContext=SparkSession.builder().appName(this.getClass.getSimpleName)
     .master(master).getOrCreate().sparkContext
   private val INTERVERL=conf.getOrElse(MyConsumerVal.INTERVERL,"2").toInt
@@ -26,6 +73,7 @@ case class FastConsumer(master:String, zkHostPort:String, kafkaHostPort:String, 
     ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG -> classOf[StringDeserializer],
     ConsumerConfig.GROUP_ID_CONFIG -> groupId,
     ConsumerConfig.AUTO_OFFSET_RESET_CONFIG -> conf.getOrElse(MyConsumerVal.AUTO_OFFSET_RESET_CONFIG,"latest"),
+
     ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG -> (false: java.lang.Boolean)
   )
   if(otherKafkaConf!=null) kafkaParams++=otherKafkaConf
@@ -33,63 +81,17 @@ case class FastConsumer(master:String, zkHostPort:String, kafkaHostPort:String, 
   private val zkclient=CuratorFrameworkFactory.builder()
     .connectString(zkHostPort)
     .retryPolicy(new ExponentialBackoffRetry(1000, 3)).build()
+  zkclient.start()
 
   private val spark=sparkContext
-  private val acc=spark.collectionAccumulator[Array[(String,Int,Long)]]
+  private val acc=spark.collectionAccumulator[(String,Int,Long)]
   private val ssc=new StreamingContext(spark,Seconds(INTERVERL))
   private val directStream=createDirectStream(ssc,kafkaParams,Set(kafkaTopic),groupId)
 
 
-  //对外接口，封装了维护偏移量的过程
-  //惨啊，DsStream指定了所有的类型，因此这里不能用泛型代劳了
-    def plan[K,V](plan:Plan[K,V]):this.type={
-    //注意闭包
-    val directStream=this.directStream
-    val acc=this.acc
-    val mapPlan=directStream.mapPartitions(a=>a.map(rdd=> {
-      //每个分区获取偏移量
-      val offsets = Array[(String,Int,Long)]((rdd.topic(), rdd.partition(), rdd.offset()))
-      val result=plan.mapMethod(rdd.value().asInstanceOf[String])
-      result._1->(result._2,offsets)
-    }))
-
-    val reduceByKeyPlan=mapPlan.reduceByKey((v1,v2)=>
-      (plan.reduceByKeyMethod(v1._1,v2._1),v1._2++v2._2)
-    )//计算完成后将偏移量发送给driver端
-      .mapPartitions(a=>a.map(rdd=>{
-        acc.add(rdd._2._2)
-        (rdd._1, rdd._2._1)
-      })).cache()
-
-    reduceByKeyPlan.window(Duration(INTERVERL*WINDOWLENGTH_BEILV*1000),Duration(INTERVERL*WINDOWSLIDE_BEILV*1000))
-        .foreachRDD(
-          rdd=> {
-            rdd.foreach(a =>plan.windowMehthod(a._1, a._2))
-            //每次窗口统一保存偏移量
-            if(!acc.isZero) {
-              val arr2 = mutable.ArrayBuffer[(String, Int, Long)]()
-              val iterator = acc.value.iterator()
-              while (iterator.hasNext)
-                arr2 ++= iterator.next()
-              val offsets = arr2.groupBy(a => (a._1, a._2)).mapValues(a => {
-                a.map(b => b._3).sorted(Ordering[Long].reverse)(0)
-              }).toArray.map(a => (a._1._1, a._1._2, a._2))
-              saveOffsets(offsets)
-              acc.reset()
-            }
-          }
-        )
-    this
-  }
-  //对外接口，启动sparkStreaming
-  def start={
-    ssc.start()
-    ssc.awaitTermination()
-  }
 
   //保存偏移量
   private def saveOffsets(offsetRange: Array[(String,Int,Long)])={
-    val zkclient=this.zkclient
     offsetRange.foreach(o=>{
       val zkPath = s"${Globe_kafkaOffsetPath}/${groupId}/${o._1}/${o._2}"
       if (zkclient.checkExists().forPath(zkPath) == null)
@@ -103,9 +105,6 @@ case class FastConsumer(master:String, zkHostPort:String, kafkaHostPort:String, 
 
   //读取偏移量
   private def readOffsets= {
-    //注意闭包
-    val zkclient=this.zkclient
-    zkclient.start()
     val zkTopicPath = Globe_kafkaOffsetPath+"/"+groupId+"/"+kafkaTopic
 
     // 检查路径是否存在，不存在就创建

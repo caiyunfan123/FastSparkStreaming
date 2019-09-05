@@ -1,12 +1,9 @@
 package mould
 
 trait Plan[K,V] extends Serializable{
-  def reduceByKeyMethod(v1:Any,v2:Any):Any=reduceByKey(v1.asInstanceOf[V],v2.asInstanceOf[V])
-  def windowMehthod(k:Any,v:Any):Unit=window(k.asInstanceOf[K],v.asInstanceOf[V])
-
   def mapMethod(value:String):(Any,Any)
-  protected def reduceByKey(v1:V, v2:V):V
-  protected def window(k:K, v:V):Unit
+  def reduceByKey(v1:V, v2:V):Any
+  def window(k:K, v:V):Unit
 }
 object Plan{
   def apply[K,V](mapFun:String=>(K,V),reduceByKeyFun:(V,V)=>V,windowFun:(K,V)=>Unit):Plan[K,V] =
