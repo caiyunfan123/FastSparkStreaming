@@ -1,5 +1,6 @@
 package mould
 
+import `val`.ConsumerVal
 import org.apache.curator.framework.CuratorFrameworkFactory
 import org.apache.curator.retry.ExponentialBackoffRetry
 import org.apache.kafka.clients.consumer.ConsumerConfig
@@ -9,6 +10,7 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.streaming.kafka010.{ConsumerStrategies, KafkaUtils, LocationStrategies}
 import org.apache.spark.streaming.{Duration, Seconds, StreamingContext}
 
+import scala.collection.JavaConversions.asScalaBuffer
 import scala.collection.mutable
 
 
@@ -43,11 +45,7 @@ case class FastConsumer(master:String, zkHostPort:String, kafkaHostPort:String, 
           rdd.foreach(a =>plan.window(a._1.asInstanceOf[K], a._2.asInstanceOf[V]))
           //每次窗口统一保存偏移量
           if(!acc.isZero) {
-            val arr2 = mutable.ArrayBuffer[(String, Int, Long)]()
-            val iterator = acc.value.iterator()
-            while (iterator.hasNext)
-              arr2 +=iterator.next()
-            val offsets = arr2.groupBy(a =>(a._1, a._2)).mapValues(a => a.sortBy(_._3)(Ordering[Long].reverse)(0)).values.toArray
+            val offsets = acc.value.groupBy(a =>(a._1, a._2)).mapValues(_.maxBy(_._3)).values.toArray
             saveOffsets(offsets)
             acc.reset()
           }
@@ -63,16 +61,16 @@ case class FastConsumer(master:String, zkHostPort:String, kafkaHostPort:String, 
 
   private val sparkContext=SparkSession.builder().appName(this.getClass.getSimpleName)
     .master(master).getOrCreate().sparkContext
-  private val INTERVERL=conf.getOrElse(MyConsumerVal.INTERVERL,"2").toInt
-  private val WINDOWLENGTH_BEILV=conf.getOrElse(MyConsumerVal.WINDOWLENGTH_BEILV,"5").toInt
-  private val WINDOWSLIDE_BEILV=conf.getOrElse(MyConsumerVal.WINDOWSLIDE_BEILV,"5").toInt
-  private val Globe_kafkaOffsetPath = conf.getOrElse(MyConsumerVal.GLOBE_OFFSET_PATH,"/kafka/offsets")
+  private val INTERVERL=conf.getOrElse(ConsumerVal.INTERVERL,"2").toInt
+  private val WINDOWLENGTH_BEILV=conf.getOrElse(ConsumerVal.WINDOWLENGTH_BEILV,"5").toInt
+  private val WINDOWSLIDE_BEILV=conf.getOrElse(ConsumerVal.WINDOWSLIDE_BEILV,"5").toInt
+  private val Globe_kafkaOffsetPath = conf.getOrElse(ConsumerVal.GLOBE_OFFSET_PATH,"/kafka/offsets")
   private var kafkaParams = Map[String, Object](
     ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG ->kafkaHostPort,
     ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG -> classOf[StringDeserializer],
     ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG -> classOf[StringDeserializer],
     ConsumerConfig.GROUP_ID_CONFIG -> groupId,
-    ConsumerConfig.AUTO_OFFSET_RESET_CONFIG -> conf.getOrElse(MyConsumerVal.AUTO_OFFSET_RESET_CONFIG,"latest"),
+    ConsumerConfig.AUTO_OFFSET_RESET_CONFIG -> conf.getOrElse(ConsumerVal.AUTO_OFFSET_RESET_CONFIG,"latest"),
 
     ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG -> (false: java.lang.Boolean)
   )

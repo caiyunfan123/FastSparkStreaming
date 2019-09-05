@@ -10,7 +10,12 @@ object WordCountConsumer {
       "master:2181,slave:2181",
       "master:9092,,slave:9092",
       "wordCount"
-    ).plan(Plan.wordCountPlan)
+    )
+      .plan(Plan.wordCountPlan)
+      .plan[String,(Int,Int)](
+      Plan(
+        (_,(1,2)),(a,b)=>(a._1+a._1,a._2+a._2),(a,b)=>println((a,b))
+      ))
       .start
   }
 }

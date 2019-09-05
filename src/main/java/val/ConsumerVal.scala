@@ -1,6 +1,6 @@
-package mould
+package `val`
 
-object MyConsumerVal {
+object ConsumerVal {
   val GLOBE_OFFSET_PATH="offsetPath"
   //if zk has not offset
   val AUTO_OFFSET_RESET_CONFIG="where to start"
