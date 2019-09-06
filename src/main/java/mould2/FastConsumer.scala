@@ -20,8 +20,18 @@ import scala.collection.mutable
 //三个坑点：1.闭包问题（如果对象不闭包，spark不通过）2.序列化问题（可以用自定义对象序列化）3.偏移量需要+1
 case class FastConsumer(master:String, zkHostPort:String, kafkaHostPort:String, groupName:String="default", interval:Int=2)(implicit globe_kafkaOffsetPath:String="/kafka/offsets", otherKafkaConf:Map[String,String]=null) extends Serializable{
 
-  //使用窗口且不缓存中间结果的计划，F为最终窗口接收的参数类型
-  def planbyWindow[F](consumerTopics:String*)(DSplan:DStream[ConsumerRecord[Any,Any]]=>DStream[F], planName:String="default")(windowFun:F=>Unit, lengthBeilv:Int=1, slideBeilv:Int=1):this.type={
+  /**
+    * 使用窗口且不缓存中间结果的计划
+    * @param consumerTopics 一个或多个主题
+    * @param DSplan         数据批处理逻辑，传入数据为带有topic信息的rdd原始数据的DStream
+    * @param planName       计划名
+    * @param windowWithAutoSave  唯一会发生偏移量保存的窗口（你可以有多个窗口计划，但只有该窗口封装了保存偏移量的操作）
+    * @param lengthBeilv    该窗口的长度倍率
+    * @param slideBeilv     该窗口的滑动时间
+    * @tparam F             该窗口接收的参数类型
+    * @return               this.type
+    */
+  def planbyWindow[F](consumerTopics:String*)(DSplan:DStream[ConsumerRecord[Any,Any]]=>DStream[F], planName:String="default")(windowWithAutoSave:F=>Unit, lengthBeilv:Int=1, slideBeilv:Int=1):this.type={
     val directStream=createDirectStream(ssc,kafkaParams,consumerTopics.toSet,groupName,planName)
     //这个累加器，理论上应该是一个闭包一个才对
     val acc=sparkContext.collectionAccumulator[(String,String,Int,Long)]
@@ -33,15 +43,24 @@ case class FastConsumer(master:String, zkHostPort:String, kafkaHostPort:String, 
       }))
     ).cache().window(Duration(interval*lengthBeilv*1000),Duration(interval*slideBeilv*1000))
       .foreachRDD(rdd=>{
-        rdd.foreachPartition(_.foreach(value=>windowFun(value)))
+        rdd.foreachPartition(_.foreach(value=>windowWithAutoSave(value)))
         saveOffsets(acc.value.groupBy(a => (a._1, a._2,a._3)).mapValues(_.maxBy(_._4)).values.toArray)
         acc.reset()
       })
     this
   }
 
-  //缓存中间结果到kafka的计划
   //参数：消费的主题、消费的计划和计划名、沉潜kafka的参数
+  /**
+    * 缓存中间结果到kafka的计划
+    * @param consumerTopics
+    * @param DSplan
+    * @param planName
+    * @param kafkaProducerConf 沉潜kafka的参数
+    * @param sinkTopic         沉潜指定的主题
+    * @param waitTime_Seconds  指定等待kafka返回的时长（秒），该时间大于0时会启动等待机制，超过等待时间则取消任务并将失败的中间结果保存到指定位置，默认值为0
+    * @return
+    */
   def planbyKafkaCache(consumerTopics:String*)(DSplan:DStream[ConsumerRecord[Any,Any]]=>DStream[String], planName:String="default")(kafkaProducerConf:Map[String,Object], sinkTopic:String, waitTime_Seconds:Int=0):this.type={
     val kafkaCli=sparkContext.broadcast[KafkaSink[String,String]](KafkaSink(kafkaProducerConf))
     val directStream=createDirectStream(ssc,kafkaParams,consumerTopics.toSet,groupName,planName)
@@ -52,17 +71,17 @@ case class FastConsumer(master:String, zkHostPort:String, kafkaHostPort:String, 
         acc.add(rdd.topic(),planName,rdd.partition(),rdd.offset())
         rdd
       }))
-    ).foreachRDD(rdd=>{
+    ).foreachRDD(rdd=> {
       //沉潜批处理结果到kafka再保存
-      rdd.foreachPartition(_.foreach(value=>{
-        val result=kafkaCli.value.send(sinkTopic,value)
-        if(waitTime_Seconds>0 && result.get(waitTime_Seconds,TimeUnit.SECONDS)==null) {
+      rdd.foreachPartition(_.foreach(value => {
+        val result = kafkaCli.value.send(sinkTopic, value)
+        if (waitTime_Seconds > 0 && result.get(waitTime_Seconds, TimeUnit.SECONDS) == null) {
           if (result.cancel(true) || result.isCancelled)
             println("数据发送失败，内容为：" + value)
         }
         println("缓存完毕")
       }))
-      saveOffsets(acc.value.groupBy(a => (a._1, a._2,a._3)).mapValues(_.maxBy(_._4)).values.toArray)
+      saveOffsets(acc.value.groupBy(a => (a._1, a._2, a._3)).mapValues(_.maxBy(_._4)).values.toArray)
       acc.reset()
     })
 //    //启动最终结果的消费者，执行最终业务
@@ -72,7 +91,14 @@ case class FastConsumer(master:String, zkHostPort:String, kafkaHostPort:String, 
     this
   }
 //
-  //纯foreach操作，可供kafkaCatch使用
+  /**
+    * 纯foreach操作，可供kafkaCatch缓存后再读入时使用
+    * @param consumerTopics
+    * @param planName
+    * @param function
+    * @tparam V   传入foreach方法的类型
+    * @return
+    */
   def foreach[V](consumerTopics:String*)(planName:String,function:V=>Unit):this.type ={
     val directStream=createDirectStream(ssc,kafkaParams,consumerTopics.toSet,groupName,planName)
     val acc=sparkContext.collectionAccumulator[(String,String,Int,Long)]
@@ -93,7 +119,7 @@ case class FastConsumer(master:String, zkHostPort:String, kafkaHostPort:String, 
     ssc.start()
     ssc.awaitTermination()
   }
-  private val sparkContext=SparkSession.builder().appName(this.getClass.getSimpleName)
+  val sparkContext=SparkSession.builder().appName(this.getClass.getSimpleName)
     .master(master).getOrCreate().sparkContext
   private var kafkaParams = Map[String, Object](
     ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG ->kafkaHostPort,
