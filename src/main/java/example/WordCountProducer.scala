@@ -12,6 +12,7 @@ object WordCountProducer {
     "I choose Hadoop"
   )
   def main(args: Array[String]): Unit = {
+    var i=0
     val rand = new Random(System.currentTimeMillis())
     val prop = new Properties()
     prop.put("bootstrap.servers","master:9092,slave:9092")
@@ -24,8 +25,9 @@ object WordCountProducer {
 
     val kafkaProducer = KafkaSink[String,String](prop)
     while(true){
+      i=i+1
       kafkaProducer.send("wordCount",str(rand.nextInt(4)))
-      println("--send--")
+      println(i+", --send--")
       Thread.sleep(1000)
     }
   }

@@ -8,13 +8,14 @@ object wordCountConsumer2 {
     FastConsumer("local[*]",
       "master:2181,slave:2181",
       "master:9092,,slave:9092",
-      "groupName"
+      "groupName",10
     )
-      .planwithWindow[(String,Int)]("wordCount")(
+      .planbyWindow[(String,Int)]("wordCount")(
       ds=>ds.mapPartitions(_.map(a=>a.value().asInstanceOf[String]->1)).reduceByKey(_+_),"windowTest")(
       windowFun = windowValue=>println(windowValue),5,5
     )
-      .planWithKafkaCache("wordCount")(
+
+      .planbyKafkaCache("wordCount")(
         DSplan = ds=>ds.mapPartitions(_.map(a=>a.value().asInstanceOf[String]->1)).reduceByKey(_+_).map(_.toString()),
         "cacheTest")(
         kafkaProducerConf = Map[String,Object](
@@ -25,8 +26,8 @@ object wordCountConsumer2 {
           KafkaProducerVal.LINGER_MS->"1",
           KafkaProducerVal.KEY_SERIALIZER->"org.apache.kafka.common.serialization.StringSerializer",
           KafkaProducerVal.VALUE_SERIALIZER->"org.apache.kafka.common.serialization.StringSerializer"
-        ),"cacheTest"
-      )
+        ),"cacheTest",10)
+      .foreach[String]("cacheTest")("cacheTest",a=>println("拿到缓存数据，准备执行业务"))
       .start
   }
 }
